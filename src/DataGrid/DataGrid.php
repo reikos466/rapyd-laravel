@@ -4,6 +4,12 @@ use Illuminate\Support\Facades\View;
 use Zofe\Rapyd\DataSet as DataSet;
 use Zofe\Rapyd\Persistence;
 use Illuminate\Support\Facades\Config;
+use App\Emisore;
+use App\Factura;
+use ZipArchive;
+
+use Redirect;
+
 
 class DataGrid extends DataSet
 {
@@ -42,7 +48,6 @@ class DataGrid extends DataSet
     //todo: like "field" for DataForm, should be nice to work with "cell" as instance and "row" as collection of cells
     public function build($view = '')
     {
-        if ($this->output != '') return;
         ($view == '') and $view = 'rapyd::datagrid';
         parent::build();
 
@@ -73,26 +78,26 @@ class DataGrid extends DataSet
             }
             $this->rows[] = $row;
         }
-        $this->output = \View::make($view, array('dg' => $this, 'buttons'=>$this->button_container, 'label'=>$this->label))->render();
-        return $this->output;
+
+        return \View::make($view, array('dg' => $this, 'buttons'=>$this->button_container, 'label'=>$this->label));
     }
 
-    public function buildCSV($file = '', $timestamp = '', $sanitize = true,$del = array())
+    public function buildCSV($file = '', $timestamp = '', $sanitize = true, $del = array())
     {
         $this->limit = null;
         parent::build();
-
-        $segments = \Request::segments();
+		$segments = \Request::segments();
 
         $filename = ($file != '') ? basename($file, '.csv') : end($segments);
         $filename = preg_replace('/[^0-9a-z\._-]/i', '',$filename);
         $filename .= ($timestamp != "") ? date($timestamp).".csv" : ".csv";
-
+		
+		
         $save = (bool) strpos($file,"/");
 
         //Delimiter
         $delimiter = array();
-        $delimiter['delimiter'] = isset($del['delimiter']) ? $del['delimiter'] : ';';
+        $delimiter['delimiter'] = isset($del['delimiter']) ? $del['delimiter'] : ',';
         $delimiter['enclosure'] = isset($del['enclosure']) ? $del['enclosure'] : '"';
         $delimiter['line_ending'] = isset($del['line_ending']) ? $del['line_ending'] : "\n";
 
@@ -104,7 +109,7 @@ class DataGrid extends DataSet
             $headers  = array(
                 'Content-Type' => 'text/csv',
                 'Pragma'=>'no-cache',
-                'Cache-Control' => 'must-revalidate, post-check=0, pre-check=0',
+                //'"Cache-Control' => 'must-revalidate, post-check=0, pre-check=0',
                 'Content-Disposition' => 'attachment; filename="' . $filename.'"');
 
             $handle = fopen('php://output', 'w');
@@ -115,7 +120,9 @@ class DataGrid extends DataSet
 
         foreach ($this->data as $tablerow) {
             $row = new Row($tablerow);
-
+			
+			$row2 = $tablerow->toArray();
+			
             foreach ($this->columns as $column) {
 
                 if (in_array($column->name,array("_edit")))
@@ -123,28 +130,97 @@ class DataGrid extends DataSet
 
                 $cell = new Cell($column->name);
                 $value =  str_replace('"', '""',str_replace(PHP_EOL, '', strip_tags($this->getCellValue($column, $tablerow, $sanitize))));
+                
+                if($value == 'misaldomn') {
+	                $emisor = Emisore::where('id',$row2['id'])->first();
+	                $saldo = $emisor->saldo()['MXN'];
+	                $cell->value( $saldo );
+	                
+                } else if($value == 'misaldome') {
+	                $emisor = Emisore::where('id',$row2['id'])->first();
+	                $saldo = $emisor->saldo()['USD'];
+	                $cell->value( $saldo );
+                } 
+                
+                if($value == 'vence') {
+	                $factura = Factura::where('id',$row2['id'])->first();
+	                
+	                $proveedor = Emisore::where('emisor',$factura->emisor)->where('user_id',$factura->user_id)->first();
+					
+					if($proveedor!=NULL){
+						$vencimiento = round($factura->vence(),0); //$fecha->format('d-m-Y');
+					} 
+					else $vencimiento = "?";
 
-                // Excel for Mac is pretty stupid, and will break a cell containing \r, such as user input typed on a
-                // old Mac.
-                // On the other hand, PHP will not deal with the issue for use, see for instance:
-                // http://stackoverflow.com/questions/12498337/php-preg-replace-replacing-line-break
-                // We need to normalize \r and \r\n into \n, otherwise the CSV will break on Macs
-                $value = preg_replace('/\r\n|\n\r|\n|\r/', "\n", $value);
-
-                $cell->value($value);
-                $row->add($cell);
+	                $cell->value( $vencimiento );
+	            }
+                else {
+				    $cell->value($value);
+                }
+                	
+                
+                $row->add($cell );
             }
-
+			
+			
             if (count($this->row_callable)) {
                 foreach ($this->row_callable as $callable) {
                     $callable($row);
                 }
             }
+			
+			// FILTROS
 
-            fputs($handle, $delimiter['enclosure'] . implode($delimiter['enclosure'].$delimiter['delimiter'].$delimiter['enclosure'], $row->toArray()) . $delimiter['enclosure'].$delimiter['line_ending']);
+			$problem = false;
+			
+			
+			if(isset($_GET['fechaEmision'])){
+				$date = new \DateTime($row2['fechaEmision']); 				
+				if($_GET['fechaEmision']['from']!=""){
+					$from = \DateTime::createFromFormat('d/m/Y H:i:s',$_GET['fechaEmision']['from']."00:00:00");
+					if($date < $from) $problem = true;
+				}
+				if($_GET['fechaEmision']['to']!=""){
+					$to = \DateTime::createFromFormat('d/m/Y H:i:s',$_GET['fechaEmision']['to']."23:59:59");
+					if($date > $to) $problem = true;
+				}
+			}
+			
+			if(isset($_GET['created_at'])){
+				$created = new \DateTime($row2['created_at']); 				
+				if($_GET['created_at']['from']!=""){
+					$from = \DateTime::createFromFormat('d/m/Y H:i:s',$_GET['created_at']['from']."00:00:00");
+					if($created < $from) $problem = true;
+				}
+				if($_GET['created_at']['to']!=""){
+					$to = \DateTime::createFromFormat('d/m/Y H:i:s',$_GET['created_at']['to']."23:59:59");
+					if($created > $to) $problem = true;
+				}
+			}
+				
+			if(isset($_GET['status_comer']) && $_GET['status_comer'] != "" && $row2['status_comer'] != $_GET['status_comer']) $problem = true;	
+			if(isset($_GET['emisor']) && $_GET['emisor'] != "" && $row2['emisor'] != $_GET['emisor'])  $problem = true;		
+			if(isset($_GET['receptor']) && $_GET['receptor'] != "" && $row2['receptor'] != $_GET['receptor'] )  $problem = true;			
+			
+			if(isset($_GET['extraSelect1']) && $_GET['extraSelect1'] != "" && $row2['extraSelect1'] != $_GET['extraSelect1'] )  $problem = true;		
+			if(isset($_GET['extraSelect2']) && $_GET['extraSelect2'] != "" && $row2['extraSelect2'] != $_GET['extraSelect2'] )  $problem = true;		
+
+			if(isset($_GET['exportMN']) && $_GET['exportMN'] != "" && $row['misaldomn'] < 1) $problem = true;	
+			if(isset($_GET['exportME']) && $_GET['exportME'] != "" && $row['misaldome'] < 1) $problem = true;	
+						
+			// FIN DE LOS FILTROS
+
+			
+			if($problem) {
+				//	
+			}
+			else {
+			    fputs($handle, $delimiter['enclosure'] . implode($delimiter['enclosure'].$delimiter['delimiter'].$delimiter['enclosure'], $row->toArray()) . $delimiter['enclosure'].$delimiter['line_ending']);
+			}
         }
 
         fclose($handle);
+        
         if ($save) {
             //redirect, boolean or filename?
         } else {
@@ -153,7 +229,292 @@ class DataGrid extends DataSet
             return \Response::make(rtrim($output, "\n"), 200, $headers);
         }
     }
+	
+	
+	//-----------------
+	
+	
+	public function buildLayout($file = '', $timestamp = '', $sanitize = true, $del = array())
+    {
+        $this->limit = null;
+        parent::build();
+		$segments = \Request::segments();
 
+        $filename = ($file != '') ? basename($file, '.txt') : end($segments);
+        $filename = preg_replace('/[^0-9a-z\._-]/i', '',$filename);
+        $filename .= ($timestamp != "") ? date($timestamp).".txt" : ".txt";
+		
+		
+        $save = (bool) strpos($file,"/");
+
+        //Delimiter
+        $delimiter = array();
+        $delimiter['delimiter'] = isset($del['delimiter']) ? $del['delimiter'] : '';
+        $delimiter['enclosure'] = isset($del['enclosure']) ? $del['enclosure'] : '';
+        $delimiter['line_ending'] = isset($del['line_ending']) ? $del['line_ending'] : "\r\n";
+
+        if ($save) {
+            $handle = fopen(public_path().'/'.dirname($file)."/".$filename, 'w');
+
+        } else {
+
+            $headers  = array(
+                'Content-Type' => 'text/txt',
+                'Pragma'=>'no-cache',
+                //'"Cache-Control' => 'must-revalidate, post-check=0, pre-check=0',
+                'Content-Disposition' => 'attachment; filename="' . $filename.'"');
+
+            $handle = fopen('php://output', 'w');
+            ob_start();
+        }
+
+        //fputs($handle, $delimiter['enclosure'].implode($delimiter['enclosure'].$delimiter['delimiter'].$delimiter['enclosure'], $this->headers) .$delimiter['enclosure'].$delimiter['line_ending']);
+
+        foreach ($this->data as $tablerow) {
+            $row = new Row($tablerow);
+			
+			$row2 = $tablerow->toArray();
+			
+            foreach ($this->columns as $column) {
+
+                if (in_array($column->name,array("_edit")))
+                    continue;
+
+                $cell = new Cell($column->name);
+                $value =  str_replace('"', '""',str_replace(PHP_EOL, '', strip_tags($this->getCellValue($column, $tablerow, $sanitize))));
+                
+                if($value == 'misaldomn') {
+	                $emisor = Emisore::where('id',$row2['id'])->first();
+	                $saldo = $emisor->saldo()['MXN'];
+	                $cell->value( sprintf('%016.2f', $saldo,$saldo) );
+	                
+                } else if($value == 'misaldome') {
+	                $emisor = Emisore::where('id',$row2['id'])->first();
+	                $saldo = $emisor->saldo()['USD'];
+	                $cell->value( $saldo );
+                }
+                else if($value == '4carcue') {
+	                $emisor = Emisore::where('id',$row2['id'])->first();
+	                $cell->value( substr($emisor->clabe, 0,3) );
+                }
+                else if($value == 'beneficiario') {
+	                $emisor = Emisore::where('id',$row2['id'])->first();
+	                $cell->value(  sprintf("%-30s", substr(strip_tags($emisor->emisorNombre), 0, 30)) );
+                }
+                else if($value == 'cuentaBancomer') {
+	                $emisor = Emisore::where('id',$row2['id'])->first();
+	                $cell->value(  sprintf("%018d", $emisor->cuenta) );
+                }
+                
+                
+                else {
+				    $cell->value($value);
+                }
+                	
+                
+                $row->add($cell );
+            }
+			
+			
+            if (count($this->row_callable)) {
+                foreach ($this->row_callable as $callable) {
+                    $callable($row);
+                }
+            }
+			
+			// FILTROS
+
+			$problem = false;
+			
+			if(isset($_GET['exportMN']) && $_GET['exportMN'] == "" && $row2['banco'] == "BANCOMER") $problem = true;	
+			if(isset($_GET['exportME']) && $_GET['exportME'] == "" && $row2['banco'] != 'BANCOMER') $problem = true;	
+
+			if(isset($_GET['exportMN']) && $_GET['exportMN'] == "" && $emisor->saldo()['MXN'] == 0 ) $problem = true;	
+			if(isset($_GET['exportME']) && $_GET['exportME'] == "" && $emisor->saldo()['MXN'] == 0 ) $problem = true;	
+						
+			// FIN DE LOS FILTROS
+
+			if($problem) {
+				//	
+			}
+			else {
+			    fputs($handle, $delimiter['enclosure'] . implode($delimiter['enclosure'].$delimiter['delimiter'].$delimiter['enclosure'], $row->toArray()) . $delimiter['enclosure'].$delimiter['line_ending']);
+			}
+        }
+
+        fclose($handle);
+        
+        if ($save) {
+            //redirect, boolean or filename?
+        } else {
+            $output = ob_get_clean();
+
+            return \Response::make(rtrim($output, "\n"), 200, $headers);
+        }
+    }
+	
+	
+	//---------------
+	
+	
+	public function buildZIP($file = '', $empresa = '',$tipo='', $sanitize = true, $del = array())
+    {
+		
+		
+        $this->limit = null;
+        parent::build();
+		$segments = \Request::segments();
+
+        $filename = ($file != '') ? basename($file, '.zip') : end($segments);
+        $filename = preg_replace('/[^0-9a-z\._-]/i', '',$filename);
+        $filename .= ".zip";
+
+        $zip = new ZipArchive();		
+		$headers = array('Content-Type' => 'application/octet-stream');
+        
+        $zip->open(public_path() . '/uploads/' . $empresa . '/' . $filename, ZipArchive::OVERWRITE);
+	    
+	    foreach ($this->data as $tablerow) {
+    	    
+    	    $row = $tablerow->toArray();
+    	    //return $row;	
+    	    $row2 = $tablerow->toArray();
+    	    
+			$file = public_path() . '/uploads/'. $empresa .'/'. $row['uuid'];
+			
+			// FILTROS
+
+			$problem = false;
+
+			if(isset($_GET['fechaEmision'])){
+				$date = new \DateTime($row2['fechaEmision']); 				
+				if($_GET['fechaEmision']['from']!=""){
+					$from = \DateTime::createFromFormat('d/m/Y H:i:s',$_GET['fechaEmision']['from']."00:00:00");
+					if($date < $from) $problem = true;
+				}
+				if($_GET['fechaEmision']['to']!=""){
+					$to = \DateTime::createFromFormat('d/m/Y H:i:s',$_GET['fechaEmision']['to']."23:59:59");
+					if($date > $to) $problem = true;
+				}
+			}
+			
+			if(isset($_GET['created_at'])){
+				$created = new \DateTime($row2['created_at']); 				
+				if($_GET['created_at']['from']!=""){
+					$from = \DateTime::createFromFormat('d/m/Y H:i:s',$_GET['created_at']['from']."00:00:00");
+					if($created < $from) $problem = true;
+				}
+				if($_GET['created_at']['to']!=""){
+					$to = \DateTime::createFromFormat('d/m/Y H:i:s',$_GET['created_at']['to']."23:59:59");
+					if($created > $to) $problem = true;
+				}
+			}
+				
+			if(isset($_GET['status_comer']) && $_GET['status_comer'] != "" && $row2['status_comer'] != $_GET['status_comer']) $problem = true;	
+			if(isset($_GET['emisor']) && $_GET['emisor'] != "" && $row2['emisor'] != $_GET['emisor'])  $problem = true;		
+			if(isset($_GET['receptor']) && $_GET['receptor'] != "" && $row2['receptor'] != $_GET['receptor'] )  $problem = true;			
+			
+			if(isset($_GET['extraSelect1']) && $_GET['extraSelect1'] != "" && $row2['extraSelect1'] != $_GET['extraSelect1'] )  $problem = true;		
+			if(isset($_GET['extraSelect2']) && $_GET['extraSelect2'] != "" && $row2['extraSelect2'] != $_GET['extraSelect2'] )  $problem = true;		
+			
+			// FIN DE LOS FILTROS
+			
+			if($problem) {
+				//	
+			}
+			else {
+				if($tipo == 'xml'){
+					$zip->addFile($file . '.xml', $row['uuid']. '.xml');
+				}
+				else if($tipo == 'pdf'){
+					if($row['pdf']!=""){
+						$zip->addFile($file . '.pdf', $row['uuid']. '.pdf');	
+					}
+				}
+				else if($tipo == 'pdf2'){
+					if($row['pdf']!=""){
+						$zip->addFile($file . '-2.pdf', $row['uuid']. '-2.pdf');	
+					}
+				}
+				else if($tipo == 'all'){
+					$zip->addFile($file . '.xml', $row['uuid']. '.xml');
+					if($row['pdf']!=""){
+						$zip->addFile($file . '.pdf', $row['uuid']. '.pdf');	
+					}
+				}
+			}
+			
+			
+			
+		}
+        
+        $zip->close();
+        
+		return \Response::download(public_path().'/uploads/'.$empresa .'/'.$filename, $filename, $headers); 
+    }
+	
+	
+	//////////////////
+	
+	public function markAllPagado($file = '', $timestamp = '', $sanitize = true, $del = array())
+    {
+        $this->limit = null;
+        parent::build();
+		$segments = \Request::segments();
+
+      
+        foreach ($this->data as $tablerow) {
+            $row = new Row($tablerow);
+			
+			$row2 = $tablerow->toArray();
+			
+			$emisor = Emisore::where('id',$row2['id'])->first();
+	        $emisor->markAllPagado();
+	        
+        }
+
+        return Redirect::back()->withInput()->with('message',  "Todas las facturas vencidas aprobadas se han marcado como pagadas");
+    }
+    
+	
+	
+	
+	//////////////////
+	
+	
+	public function buildZIPPDF($file = '', $empresa = '', $sanitize = true, $del = array())
+    {
+        $this->limit = null;
+        parent::build();
+		$segments = \Request::segments();
+
+        $filename = ($file != '') ? basename($file, '.zip') : end($segments);
+        $filename = preg_replace('/[^0-9a-z\._-]/i', '',$filename);
+        $filename .= ".zip";
+
+        $zip = new ZipArchive();		
+		$headers = array('Content-Type' => 'application/octet-stream');
+        
+        $zip->open(public_path() . '/uploads/' . $empresa . '/' . $filename, ZipArchive::OVERWRITE);
+	    
+	    foreach ($this->data as $tablerow) {
+    	    
+    	    $row = $tablerow->toArray();
+    	    //return $row;	
+    	    
+			$file = public_path() . '/uploads/'. $empresa .'/'. $row['uuid'];
+			
+			if($row['pdf']!=""){
+				$zip->addFile($file . '.pdf', $row['uuid']. '.pdf');	
+			}
+        }
+        
+        $zip->close();
+		return \Response::download(public_path().'/uploads/'.$empresa .'/'.$filename, $filename, $headers); 
+    }
+	
+	//---------------
+	
     protected function getCellValue($column, $tablerow, $sanitize = true)
     {
         //blade
@@ -223,7 +584,7 @@ class DataGrid extends DataSet
 
     public function getGrid($view = '')
     {
-        $this->build($view);
+        $this->output = $this->build($view)->render();
 
         return $this->output;
     }
